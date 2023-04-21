@@ -4,9 +4,10 @@ export LANG=C.UTF-8
 f_version() {
     echo -e '
  Сценарий ввода РЕД ОС в домен Windows/SAMBA, FreeIPA
- Version 0.5.8
- Last update: 28-12-2022
+ Version 0.5.13
+ Last update: 20-04-2023
 
+ (c) RED SOFT
 '
 }
 
@@ -44,11 +45,14 @@ while [ -n "$1" ]; do
       -f|--force)
                 force=$@ # Ввод в домен под своим прежним именем ПК
                 ;;
---sssd-lower-case)
-                v_slc=$@ # Имя пользователя в нижнем регистре
-                ;;
 --delete-computer)
                 del_pc=$@
+                ;;
+--lower-case)
+                lower_case=$@ # Имя пользователя в нижнем регистре
+                ;;
+--save-case)
+                save_case=$@ # Имя пользователя с сохранением регистра, как в AD
                 ;;
          -g|--gui)
                 gui=$@
@@ -83,9 +87,10 @@ f_help() {
                 -w Позволяет ввести в домен, используя Winbind (по умолчанию применяется SSSD)
                 -y Автоматическое подтверждение запросов на выполнение действий при работе скрипта с параметрами
        -f, --force Принудительный ввод в домен (вывод из домена) под своим прежним именем ПК (игнорируется существующая учетная запись ПК в домене)
+      --lower-case Имя пользователя в нижнем регистре
+       --save-case Имя пользователя с сохранением регистра, как в AD
               --wg Указать "Имя домена (пред-Windows 2000)", необязательный ключ
  --delete-computer Удаляет учётную запись ПК из домена (не выводит сам ПК из домена), см. пример №3
- --sssd-lower-case Принудительно устанавливает имя пользователя в нижнем регистре
          -g, --gui Запуск скрипта с графическим интерфейсом
         -h, --help Показать справку
      -v, --version Вывод версии
@@ -106,14 +111,10 @@ f_help() {
     exit
 }
 
-
-# Если ключ -h или --help , то выводим справку
 if [ -n "$help" ]
     then f_help
 fi
 
-
-# Если ключ -v, то выводим версию скрипта
 if [ -n "$version" ]
     then f_version
     exit
@@ -127,6 +128,8 @@ if [ "$(id -u)" != "0" ]; then
    echo
    exit 1
 fi
+
+v_admin=${v_admin%%@*} # обрезаем все, что идет после @
 
 # Если ключ --delete-computer, то удаляем УЗ ПК из домена
 if [ -n "$del_pc" ]
@@ -163,29 +166,40 @@ uname -a &>> /var/log/join-to-domain.log
 lsb_release -a &>> /var/log/join-to-domain.log
 echo " " &>> /var/log/join-to-domain.log
 
+if [ -n "$gui" ]; then
+  if [ ! -f /usr/bin/yad ]; then
+     zenity --error --text "Для работы приложения в графическом режиме\nтребуется YAD(display GTK+ dialogs in shell scripts).\nУстановка:\ndnf install yad" --no-wrap &> /dev/null
+    exit
+  fi
+fi
+
 # Функция вызова вопроса о продолжении выполнения сценария
 myAsk() {
+    local prompt=" Продолжить выполнение (y/n)? "
+    if [ -n "$gui" ] || [ -n "$yes" ]; then
+        return 0
+    fi
+
     while true; do
-	# Если запущено с gui zenity, то не спрашивать...выполнить break
-	if [ -n "$gui" ]; then
-	    break
-	fi
-  if [[ -n "$yes" ]]
-  then
-    break
-  fi
- 	read -p " Продолжить выполнение (y/n)? " yn
-	case $yn in
-	    [Yy]* ) return 0; break;;
-	    [Nn]* ) exit;;
-	    * ) echo "Ответьте yes или no";;
-	esac
+        read -p "$prompt" answer
+        case "$answer" in
+            [Yy]* )
+                return 0
+                ;;
+            [Nn]* )
+                exit
+                ;;
+            * )
+                echo " Ответьте yes или no"
+                ;;
+        esac
     done
 }
 
 # Синхронизация времени с контроллером домена
 chrony_conf()
 {
+  systemctl is-active --quiet systemd-timesyncd && systemctl disable systemd-timesyncd --now &> /dev/null
   v_date_time=$(date '+%d-%m-%y_%H-%M-%S')
   cp /etc/chrony.conf /etc/chrony.conf.$v_date_time
   sed -i '/server/d' /etc/chrony.conf
@@ -196,27 +210,28 @@ chrony_conf()
 }
 
 f_choce_pill() {
-    while true; do
-	# Если запущено с gui zenity, то не спрашивать...выполнить break
+	while true; do
+	# Если запущено с gui, то не спрашивать...выполнить break
 	if [ -n "$gui" ]; then
 	    break
 	fi
-  if [ -n "$yes" ]; then
-      choce_domain=1
-      break
-  fi
-  echo ""
-  echo " Выберите тип домена:"
-  echo " 1. Ввод РЕД ОС в домен Windows/SAMBA"
-  echo " 2. Ввод РЕД ОС в домен IPA"
- 	read -p " Укажите (1 или 2): " choce_domain
+	if [ -n "$yes" ]; then
+		choce_domain=1
+		break
+	fi
+	echo -e "\n Выберите тип домена:"
+	echo " 1. Ввод РЕД ОС в домен Windows/SAMBA"
+	echo " 2. Ввод РЕД ОС в домен IPA"
+	read -p " Укажите (1 или 2): " choce_domain
 	case $choce_domain in
 	    [1]* ) return $choce_domain; break;;
 	    [2]* ) return $choce_domain; break;;
-      [Nn]* ) exit;;
-	    * )
+		[Nn]* ) exit;;
+			* )
+			printf "%s\n" "Ошибка: введено некорректное значение."
+			continue;;
 	esac
-    done
+	done
 }
 
 
@@ -224,28 +239,27 @@ f_choce_pill() {
 f_realm_discover()
 {
 realm discover $v_domain &> /dev/null
-if [ $? -ne 0 ];
-then
-     echo
-     echo -e ${RED}' Домен '${NC}${GREEN}$v_domain${NC}${RED}' недоступен! Проверьте настройки сети.'${NC}
-     echo -e ' Домен '$v_domain' недоступен! Проверьте настройки сети.' &>> /var/log/join-to-domain.log
-     exit 1
-  else echo -e ' Домен '${GREEN}$v_domain${NC}' доступен!'
-       echo -e ' Домен '$v_domain' доступен!' &>> /var/log/join-to-domain.log
+if [ $? -ne 0 ]; then
+	echo -e ${RED}'\n Домен '${NC}${GREEN}$v_domain${NC}${RED}' недоступен! Проверьте настройки сети.'${NC}
+	echo -e ' Домен '$v_domain' недоступен! Проверьте настройки сети.' &>> /var/log/join-to-domain.log
+	exit 1
+else
+	echo -e ' Домен '${GREEN}$v_domain${NC}' доступен!'
+	echo -e ' Домен '$v_domain' доступен!' &>> /var/log/join-to-domain.log
 fi
 }
 
 # Функция проверки имени ПК
 checkname()
 {
-	if grep -Pq '(^(?:[a-zA-Z0-9](?:(?:[a-zA-Z0-9\-]){0,61}[a-zA-Z0-9\-])?)+[a-zA-Z0-9]$)' <<< $v_name_pc
+	if [[ $(grep -P '(^(?:[a-zA-Z0-9](?:(?:[a-zA-Z0-9\-]){0,14}[a-zA-Z0-9\-])+[a-zA-Z0-9])$)' <<< $v_name_pc) && ${#v_name_pc} -le 15 ]]
 	then
 	  check_name="true"
 	fi
 	if [ "$v_name_pc" != "$1" ] && [ "$check_name" = "true" ];
-	  then true
-		else echo -e "\n ${RED}Ошибка! Недопустимое имя ПК!${NC}"
-		     echo -e " Ошибка! Недопустимое имя ПК!" &>> /var/log/join-to-domain.log
+		then true
+	else echo -e "\n ${RED}Ошибка! Недопустимое имя ПК!${NC}"
+		echo -e " Ошибка! Недопустимое имя ПК!" &>> /var/log/join-to-domain.log
 		exit 1
 	fi
 }
@@ -265,8 +279,7 @@ cat /tmp/join_check.txt &>> /var/log/join-to-domain.log
 if grep -Pq "sAMAccountName" <<< "$v_check";
     then
     if [[ -n "$force" ]]; then
-            echo ""
-            echo -e ${YEL}" В домене уже существует компьютер "${NC}${GREEN}$3${NC}
+            echo -e ${YEL}"\n В домене уже существует компьютер "${NC}${GREEN}$3${NC}
             echo -e " Предупреждение! В домене уже существует компьютер "$3 &>> /var/log/join-to-domain.log
             if [[ -n "$v_ou" ]]; then
                 unset v_ou
@@ -277,8 +290,7 @@ if grep -Pq "sAMAccountName" <<< "$v_check";
                 echo -e " Ошибка! В домене уже существует компьютер "$v_name_pc &>> /var/log/join-to-domain.log
                 f_create_form &> /dev/null
     else
-		echo ""
-		echo -e ${RED}" В домене уже существует компьютер "${NC}${GREEN}$3${NC}
+		echo -e ${RED}"\n В домене уже существует компьютер "${NC}${GREEN}$3${NC}
 		echo -e " Ошибка! В домене уже существует компьютер "$3 &>> /var/log/join-to-domain.log
 		echo -e ${RED}" Удалите данную учетную запись компьютера в домене или укажите иное имя ПК."${NC}
 		echo -e " Удалите данную учетную запись компьютера в домене или укажите иное имя ПК." &>> /var/log/join-to-domain.log
@@ -290,13 +302,11 @@ if grep -Pq "Couldn't authenticate" <<< "$v_check";
     then
         if [[ -n "$v_pass_admin_gui" ]];
 	    then
-	        zenity --warning --text 'Неверное имя администратора домена или пароль!' \
-           	--no-wrap &> /dev/null
+	        zenity --warning --text 'Неверное имя администратора домена или пароль!' --no-wrap &> /dev/null
            	echo -e " Ошибка! Неверное имя администратора домена или пароль! " &>> /var/log/join-to-domain.log
             f_create_form &> /dev/null
  	    else
-	        echo ""
-	        echo -e ${RED}" Неверное имя администратора домена или пароль! "${NC}
+	        echo -e ${RED}"\n Неверное имя администратора домена или пароль! "${NC}
 	        echo -e " Ошибка! Неверное имя администратора домена или пароль! " &>> /var/log/join-to-domain.log
 	        echo
 	        exit 1;
@@ -331,7 +341,7 @@ f_create_form_choce_pill () {
     v_1=${data[1]}
 
 # Если samba
-    if [  "$v_1" = "Windows/Samba" ]; then
+    if [ "$v_1" = "Windows/Samba" ]; then
       select_pill='SAMBA'
     fi
 # Если IPA
@@ -367,8 +377,7 @@ f_create_form_IPA () {
     # Проверка доступности домена
     realm discover $v_domain &> /dev/null
     if [ $? -ne 0 ];
-	then zenity --warning --text 'Домен '$v_domain' недоступен!
-Проверьте настройки сети.'
+	then zenity --warning --text 'Домен '$v_domain' недоступен! Проверьте настройки сети.' --no-wrap &> /dev/null
 	f_create_form_IPA &> /dev/null
     fi
 
@@ -377,7 +386,7 @@ f_create_form_IPA () {
 	then
 	    echo " Имя ПК: $v_name_pc"
 	else
-	    zenity --warning --text "Ошибка! Недопустимое имя ПК!" &> /dev/null
+	    zenity --warning --text "Ошибка! Недопустимое имя ПК!" --no-wrap &> /dev/null
 	    f_create_form_IPA &> /dev/null
     fi
 }
@@ -415,14 +424,22 @@ if [[ -z "$v_kdc" ]]; then
 			krb5_kdc1="kdc = $i"
 			kdc1=$i
 		fi
-		if [ "$full_str" == *"$str_closest"* ] && [ "$full_str" != *"$str_pdc"* ]; then
+		if [[ "$full_str" == *"$str_closest"* ]] && [[ "$full_str" != *"$str_pdc"* ]]; then
 			krb5_kdc2="kdc = $i"
+			kdc2=", $i, _srv_"
 		fi
 	done
-	else
+else
 	kdc1=$v_kdc
 	krb5_kdc1="kdc = $v_kdc"
 fi
+
+# Добавление поддержки rc4-hmac
+echo -e '[libdefaults]
+default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 RC4-HMAC DES-CBC-CRC DES3-CBC-SHA1 DES-CBC-MD5
+default_tkt_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 RC4-HMAC DES-CBC-CRC DES3-CBC-SHA1 DES-CBC-MD5
+preferred_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 RC4-HMAC DES-CBC-CRC DES3-CBC-SHA1 DES-CBC-MD5
+' > /etc/krb5.conf.d/crypto-policies
 
 echo -e 'includedir /etc/krb5.conf.d/
 
@@ -464,31 +481,40 @@ echo -e 'includedir /etc/krb5.conf.d/
 
 # Функция создания формы ввода в домен Windows/Samba
 f_create_form () {
-    data=( $(zenity --forms --separator=" " \
-     --title="Ввод в домен" \
-     --text="Ввод компьютера в домен" \
-     --add-entry="Имя домена:" \
-     --add-entry="Имя компьютера:" \
-     --add-entry="Имя администратора домена:" \
-     --add-password="Пароль администратора:" \
-     --ok-label="Да" \
-     --cancel-label="Отмена") )
+    v_domain=`cat /etc/resolv.conf |grep -i '^search'|head -n1|cut -d ' ' -f2`
+    if [[ -z $v_name_pc ]]; then
+      if [[ `hostname -s` = "localhost" ]]; then
+        v_name_pc=" "
+        else v_name_pc=`hostname -s`
+      fi
+    fi
+    data=( $(yad  --width=420 --title="Ввод в домен" --text="<b>Ввод компьютера в домен:</b>" \
+        --form --separator=" " --item-separator="," \
+        --field="Имя домена:" "$v_domain" \
+        --field="Имя компьютера:" "$v_name_pc" \
+        --field="Имя администратора:" "$v_admin" \
+        --field="Пароль администратора:":H "$v_pass_admin_gui" \
+          ) )
 
-   # Если zenity NO, то выход из скрипта
-   if [ $? -eq 1 ]; then
-	exit
-   fi
+    # Выход
+    if [ $? -eq 1 ]; then
+      exit
+    fi
 
     v_domain=${data[0]}
     v_name_pc=${data[1]}
-    v_admin=${data[2]}
+    v_admin=${data[2]%%@*} # обрезаем все, что идет после @
     v_pass_admin_gui=${data[3]}
+    if [[ -z "$v_name_pc" || -z  "$v_admin" || -z "$v_pass_admin_gui" || -z "$v_domain"  ]]; then
+      zenity --warning --text "Заполните все поля формы ввода в домен." --no-wrap  &> /dev/null
+      f_create_form &> /dev/null
+    fi
 
     # Проверка доступности домена
     realm discover $v_domain &> /dev/null
     if [ $? -ne 0 ];
-	then zenity --warning --text 'Домен '$v_domain' недоступен! Проверьте настройки сети.' --no-wrap &> /dev/null
-	f_create_form &> /dev/null
+      then zenity --warning --text "Домен $v_domain недоступен! Проверьте настройки сети." --no-wrap &> /dev/null
+      f_create_form &> /dev/null
     fi
 
     # Проверка имени компьютера
@@ -496,7 +522,7 @@ f_create_form () {
 	then
 	    echo " Имя ПК: $v_name_pc"
 	else
-	    zenity --warning --text "Ошибка! Недопустимое имя ПК!" &> /dev/null
+	    zenity --warning --text "Ошибка! Недопустимое имя ПК!" --no-wrap &> /dev/null
 	    echo  "  Ошибка! Недопустимое имя ПК!" &>> /var/log/join-to-domain.log
 	    f_create_form &> /dev/null
     fi
@@ -510,8 +536,8 @@ f_create_form () {
     then
         echo " Имя ПК: $v_name_pc"
     else
-	    zenity --warning --text 'Ошибка! Имя ПК ('$v_name_pc') не должно совпадать с именем контроллера домена!' --no-wrap &> /dev/null
-	    echo -e '  Ошибка! Имя ПК ('$v_name_pc') не должно совпадать с именем контроллера домена!' &>> /var/log/join-to-domain.log
+	    zenity --warning --text "Ошибка! Имя ПК '$v_name_pc' не должно совпадать с именем контроллера домена!" --no-wrap &> /dev/null
+	    echo -e "  Ошибка! Имя ПК ('$v_name_pc') не должно совпадать с именем контроллера домена!" &>> /var/log/join-to-domain.log
 	    f_create_form &> /dev/null
     fi
 
@@ -522,14 +548,10 @@ f_create_form () {
 
 f_msg_exit_domian()
 {
-  if [ -n "$gui" ]
-    then
-     zenity --info \
-  	 --title="Вывод из домена" \
-            --text="Компьютер выведен из домена! Перезагрузите ПК!" \
-            --width=210 --height=140 &> /dev/null
-  fi
-  exit;
+	if [ -n "$gui" ]; then
+		zenity --info --title="Вывод из домена" --text="Компьютер выведен из домена! \nПерезагрузите ПК!" --no-wrap &> /dev/null
+	fi
+	exit;
 }
 
 # Down the Rabbit Hole
@@ -578,8 +600,11 @@ freedom()
         echo ' Применен ключ -f, учетная запись ПК не будет удалена с контроллера домена!'
     fi
     myAsk
-    v_delete_host=`hostname -a`
+    v_delete_host=`hostname -s`
     v_domain=`hostname -d`
+	dns=`nmcli dev show | awk '/DNS/{print $2}' | head -n1`
+	host=`hostname -s`
+	ip=`hostname -I | awk '{print $1}'`
 
     if [ -n "$gui" ]
 		then
@@ -596,15 +621,25 @@ freedom()
 				exit
 			fi
 
-			v_leave_admin=${data_exit[0]}
+			v_leave_admin=${data_exit[0]%%@*}
 			v_pass_admin_gui=${data_exit[1]}
-			adcli delete-computer -U $v_leave_admin --domain=$v_domain  $v_delete_host --stdin-password <<< $v_pass_admin_gui &>> /var/log/join-to-domain.log
-			if [ $? -ne 0 ]; then
+			v_pass_dns=$v_pass_admin_gui
+			# Удаление ПК из домена
+			echo -e " " &>> /var/log/join-to-domain.log
+			echo -e " ***Выполнение <adcli delete-computer>***" &>> /var/log/join-to-domain.log
+			adcli delete-computer -vvv -U $v_leave_admin --domain=$v_domain  $v_delete_host --stdin-password <<< $v_pass_admin_gui &>> /var/log/join-to-domain.log
+			err_adcli=$?
+			err_str_adcli=`cat /var/log/join-to-domain.log | tail -n 1`
+			if [ $err_adcli -ne 0 ]; then
+				if echo "$err_str_adcli" | grep -q "No computer account for"; then
+					echo " Учетная запись "`hostname -s`" отсутсвовала в домене"
+				else 
 				zenity --error \
                    --title="Вывод из домен Windwos/Samba" \
                    --text="Ошибка удаления учётной записи ПК из домена. \nВозможно логин или пароль введен неверно.\nсм.  /var/log/join-to-domain.log" \
                    --no-wrap &> /dev/null
 				exit 1;
+				fi
 			fi
 		else
 			echo ""
@@ -612,26 +647,52 @@ freedom()
 			echo ' Удаление учетной записи ПК из домена.'
 			read -p ' Введите имя контроллера домена или для продолжения нажмите ENTER: ' v_kdc
 			read -p ' Введите имя администратора домена: ' v_leave_admin
+			read -sp  " Введите пароль администратора домена: " v_pass_admin && echo
+			v_pass_dns=$v_pass_admin
+			v_leave_admin=${v_leave_admin%%@*}
 			if [ -n "$v_kdc" ]
 				then
-				adcli delete-computer -U $v_leave_admin -S $v_kdc --domain=$v_domain  $v_delete_host &>> /var/log/join-to-domain.log
+				# Удаление ПК из домена
+				echo -e " " &>> /var/log/join-to-domain.log
+				echo -e " ***Выполнение <adcli delete-computer -S $v_kdc>***" &>> /var/log/join-to-domain.log
+				adcli delete-computer -vvv -U $v_leave_admin --domain=$v_domain  $v_delete_host -S $v_kdc --stdin-password <<< $v_pass_admin &>> /var/log/join-to-domain.log
+				err_adcli=$?
+				err_str_adcli=`cat /var/log/join-to-domain.log | tail -n 1`
 			else
-				adcli delete-computer -U $v_leave_admin --domain=$v_domain  $v_delete_host &>> /var/log/join-to-domain.log
+				# Удаление ПК из домена
+				echo -e " " &>> /var/log/join-to-domain.log
+				echo -e " ***Выполнение <adcli delete-computer>***" &>> /var/log/join-to-domain.log
+				adcli delete-computer -vvv -U $v_leave_admin --domain=$v_domain  $v_delete_host --stdin-password <<< $v_pass_admin &>> /var/log/join-to-domain.log
+				err_adcli=$?
+				err_str_adcli=`cat /var/log/join-to-domain.log | tail -n 1`
 			fi
-			if [ $? -ne 0 ]; then
+			if [ $err_adcli -ne 0 ]; then
+				if echo "$err_str_adcli" | grep -q "No computer account for"; then
+					echo " Учетная запись "`hostname -s`" отсутсвовала в домене"
+				else
 				echo -e " ${RED}Ошибка вывода из домена, см. /var/log/join-to-domain.log${NC}"
 				echo -e " ${RED}Возможно логин или пароль введен неверно.${NC}"
 				echo -e " Ошибка вывода из домена, см.  /var/log/join-to-domain.log" &>> /var/log/join-to-domain.log
 				exit 1;
+				fi
 			fi
-            fi
+			fi
 	fi
-    # backup smb.conf
-    cp /etc/samba/smb.conf /etc/samba/smb.conf.$v_date_time
-    realm leave -v --client-software=sssd &>> /var/log/join-to-domain.log
-    realm leave -v --client-software=winbind &>> /var/log/join-to-domain.log
-    sss_cache -E &>> /var/log/join-to-domain.log
-    kdestroy &>> /var/log/join-to-domain.log
+	echo -e " " &>> /var/log/join-to-domain.log
+	echo -e "dns:" $dns &>> /var/log/join-to-domain.log
+	echo -e "v_domain:" $v_domain &>> /var/log/join-to-domain.log
+	echo -e "ip:" $ip &>> /var/log/join-to-domain.log
+	echo -e "v_leave_admin:" $v_leave_admin &>> /var/log/join-to-domain.log
+	# Удаление DNS записи
+	echo -e " ***Выполнение <samba-tool dns delete>***" &>> /var/log/join-to-domain.log	
+	samba-tool dns delete $dns $v_domain $host A $ip -U $v_leave_admin -d 3 <<< $v_pass_dns &>> /var/log/join-to-domain.log
+	#
+	cp /etc/samba/smb.conf /etc/samba/smb.conf.$v_date_time
+	realm leave -v --client-software=sssd &>> /var/log/join-to-domain.log
+	realm leave -v --client-software=winbind &>> /var/log/join-to-domain.log
+	sss_cache -E &>> /var/log/join-to-domain.log
+	kdestroy -A &>> /var/log/join-to-domain.log
+	rm -rf /tmp/krb5cc* /var/lib/sss/db/*
 
 echo -e '
 [global]
@@ -667,37 +728,11 @@ echo -e '
 	create mask = 0664
   directory mask = 0775
 ' > /etc/samba/smb.conf
-    echo
-    echo ' Компьютер выведен из домена.' | tee -a /var/log/join-to-domain.log
-    f_msg_exit_domian
+	echo
+	echo ' Компьютер '`hostname -s`' выведен из домена.' | tee -a /var/log/join-to-domain.log
+	f_msg_exit_domian
 }
 
-
-rpm_install_error () {
-if [ $? -ne 0 ];
-	then echo -e "   ${RED} Ошибка установки необходимого RPM-пакета, см. /var/log/join-to-domain.log${NC}"
-		exit 1;
-	else echo -e "    Пакет $i успешно установлен! " | tee -a /var/log/join-to-domain.log
-fi
-}
-
-check_rpm_install(){
-declare -a rpm_array=( "realmd" "sssd" "oddjob" "oddjob-mkhomedir" "adcli" "samba-common" "samba-common-tools" "krb5-workstation" "samba-winbind-clients" )
-for i in "${rpm_array[@]}"
-do
-  rpm_result=$(rpm -q $i)
-  if [[ $? -eq "1" ]];
-	then
-	echo -e "    Пакет $i не установлен! Выполняю установку $i" | tee -a /var/log/join-to-domain.log
-	if [ -f "/usr/bin/dnf" ]; then
-		dnf install $i -y &>> /var/log/join-to-domain.log
-		rpm_install_error
-	else yum install $i -y &>> /var/log/join-to-domain.log
-		rpm_install_error
-	fi
-  fi
-done
-}
 
 # Проверка на realm list
 result_realm=$(realm list)
@@ -714,18 +749,20 @@ if [ -z "$result_realm" ]
           --cancel-label="Отмена" \
           --no-wrap &> /dev/null
 	)
-# Если zenity NO, то выход из скрипта
-   if [ $? -eq 1 ]
-	then
-	exit
+# Сохраняем значение кода возврата Zenity в переменную
+   zenity_exit=$?
+
+   # Если zenity NO, то выход из скрипта
+   if [ $zenity_exit -eq 1 ]; then
+      exit
    fi
-# Если zenity Yes, то вывод из домена
-   if [ $? -eq 0 ]
-	then
+
+   # Если zenity Yes, то вывод из домена
+   if [ $zenity_exit -eq 0 ]; then
+      freedom
+   fi
+else echo
 	freedom
-   fi
-   else echo
-        freedom
 
 fi
 
@@ -768,8 +805,7 @@ fi
 # Follow the white rabbit
 if [ "$choce_domain" = "2" ]
 then
-  echo
-  echo -e ' Для ввода РЕД ОС в домен IPA, введите имя домена.\n Пример: example.com\n'
+  echo -e '\n Для ввода РЕД ОС в домен IPA, введите имя домена.\n Пример: example.com\n'
   read -p ' Имя домена: ' v_domain
   echo ' Введите имя ПК. Пример: client1'
 
@@ -799,11 +835,9 @@ fi
 
 # ---------- Ввод данных в терминале ----------
 # Если отсутствуют входные параметры скрипта
-if [[ -z "$v_domain"  &&  -z "$v_name_pc"  &&  -z "$v_admin" && -z "$gui" &&  -z "$v_ou" ]];
-  then
-
-    v_search_domain=$(cat /etc/resolv.conf | grep "search " | awk '{print $2}')
-    if  [[ -z "$v_search_domain" ]]; then
+if [[ -z "$v_domain"  &&  -z "$v_name_pc"  &&  -z "$v_admin" && -z "$gui" &&  -z "$v_ou" ]]; then
+	v_search_domain=$(cat /etc/resolv.conf | grep "search " | awk '{print $2}')
+	if  [[ -z "$v_search_domain" ]]; then
 		echo -e ' Для ввода РЕД ОС в домен Windows/SAMBA, введите имя домена.\n Пример: example.com\n'
 		read -p ' Имя вашего домена: ' v_domain
     else
@@ -834,6 +868,7 @@ if [[ -z "$v_domain"  &&  -z "$v_name_pc"  &&  -z "$v_admin" && -z "$gui" &&  -z
 
 	read -p ' Имя администратора домена: ' v_admin
 	read -p ' Имя подразделения ПК(OU=MyComputers) без кавычек или для продолжения нажмите ENTER:' v_ou
+	v_admin=${v_admin%%@*} # обрезаем все, что идет после @
     # Проверка вводимых данных
     if [[ -z "$v_admin" ]]
        then echo -e " ${RED}Ошибка! Введите имя администратора домена.${NC}"
@@ -908,36 +943,21 @@ fi
 
 echo -e '' >> /var/log/join-to-domain.log
 
-# Установка дополнительных пакетов
-if [[ -n "$v_pass_admin_gui" ]];
-then
-(
-	echo -e ' 1) Проверка наличия установленных RPM-пакетов (GUI)' | tee -a /var/log/join-to-domain.log	
-	check_rpm_install
-) |
-   zenity  --title="Ввод в домен!" --text="Установка необходимых пакетов..." --width=300 --height=140 --progress --pulsate --auto-close --auto-kill
-   else
-   echo -e ' 1) Проверка наличия установленных RPM-пакетов' | tee -a /var/log/join-to-domain.log
-   check_rpm_install
-fi
-
-echo -e ' 2) Изменение имени ПК' | tee -a /var/log/join-to-domain.log
+echo -e ' 1) Изменение имени ПК' | tee -a /var/log/join-to-domain.log
 hostnamectl set-hostname $v_name_pc.$v_domain
 echo -e '    Новое имя ПК: '`hostname` | tee -a /var/log/join-to-domain.log
-
 v_date_time=$(date '+%d-%m-%y_%H:%M:%S')
 
 # Настройка chronyd
-echo -e ' 3) Настройка chronyd' | tee -a /var/log/join-to-domain.log
+echo -e ' 2) Настройка chronyd' | tee -a /var/log/join-to-domain.log
 chrony_conf
 
 # Настройка hosts
-echo -e ' 4) Настройка hosts' | tee -a /var/log/join-to-domain.log
+echo -e ' 3) Настройка hosts' | tee -a /var/log/join-to-domain.log
 cp /etc/hosts /etc/hosts.$v_date_time
 echo -e '127.0.0.1 localhost localhost.localdomain localhost4 localhost4.localdomain4' > /etc/hosts
 echo -e '::1 localhost localhost.localdomain localhost6 localhost6.localdomain6' >> /etc/hosts
 echo -e '127.0.0.1  '$(hostname -f)' '$(hostname -s)'' >> /etc/hosts
-
 
 os_name=`cat /etc/os-release | grep ^"NAME=" | awk -F= '{print $2}' | sed 's/\"//g'`
 os_version=`cat /etc/os-release | grep ^"VERSION_ID=" | awk -F= '{print $2}' | sed 's/\"//g'`
@@ -955,21 +975,20 @@ sed -i "s/SELINUX=enforcing/SELINUX=permissive/" /etc/selinux/config
 setenforce 0
 systemctl disable sssd
 systemctl stop sssd
-echo -e ' 5) Ввод в домен (winbind) ...' | tee -a /var/log/join-to-domain.log
-
-realm join -vvv -U $v_admin --client-software=winbind $v_domain "$v_ou_realm_join" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin &>> /var/log/join-to-domain.log
+echo -e ' 4) Ввод в домен (winbind) ...' | tee -a /var/log/join-to-domain.log
+realm join -vvv -U "$v_admin" --client-software=winbind "$v_domain" --os-name="$os_name" --os-version="$os_version" $v_ou_realm_join <<< $v_pass_admin &>> /var/log/join-to-domain.log
 if [ $? -ne 0 ];
   then echo -e "    ${RED}Ошибка ввода в домен, см. /var/log/join-to-domain.log${NC}"
        echo -e "    Ошибка ввода в домен, см. /var/log/join-to-domain.log" &>> /var/log/join-to-domain.log
        exit 1;
 fi
 
-echo -e ' 6) Выполняется authselect' | tee -a /var/log/join-to-domain.log
+echo -e ' 5) Выполняется authselect' | tee -a /var/log/join-to-domain.log
 authselect select winbind with-mkhomedir with-krb5 --force &>> /var/log/join-to-domain.log
 authselect enable-feature with-mkhomedir &>> /var/log/join-to-domain.log
 
 # samba config log
-echo -e ' 7) Настройка samba' | tee -a /var/log/join-to-domain.log
+echo -e ' 6) Настройка samba' | tee -a /var/log/join-to-domain.log
 
 # backup smb.conf
 cp /etc/samba/smb.conf /etc/samba/smb.conf.$v_date_time
@@ -1041,7 +1060,7 @@ echo -e '[global]
     create mask = 0664
     directory mask = 0775' > /etc/samba/smb.conf
 
-echo -e ' 8) Тест конфигурации samba' | tee -a /var/log/join-to-domain.log
+echo -e ' 7) Тест конфигурации samba' | tee -a /var/log/join-to-domain.log
 echo -e "\n" | testparm &>> /var/log/join-to-domain.log
 
 # Настройка limits
@@ -1052,10 +1071,10 @@ root  -  nofile  16384' > /etc/security/limits.conf
 # join to domain
 join_to_domain() {
     if [[ $wg == "" ]] ; then
-      echo -e ' 9) Выполняю net ads join' | tee -a /var/log/join-to-domain.log
+      echo -e ' 8) Выполняю net ads join' | tee -a /var/log/join-to-domain.log
       net ads join -S "${kdc1}" -U "${v_admin}%${v_pass_admin}" &>> /var/log/join-to-domain.log
       else
-      echo -e ' 9) Выполняю net ads join' | tee -a /var/log/join-to-domain.log
+      echo -e ' 8) Выполняю net ads join' | tee -a /var/log/join-to-domain.log
       net ads join -S "${kdc1}" -U "${v_admin}%${v_pass_admin}" -W "$wg" &>> /var/log/join-to-domain.log
     fi
 
@@ -1066,9 +1085,9 @@ join_to_domain() {
 join_to_domain
 
 # Запуск сервисов
-echo -e ' 10) Запуск сервиса winbind' | tee -a /var/log/join-to-domain.log
+echo -e ' 9) Запуск сервиса winbind' | tee -a /var/log/join-to-domain.log
 systemctl enable winbind --now &>> /var/log/join-to-domain.log
-echo -e ' 11) Запуск сервиса smb' | tee -a /var/log/join-to-domain.log
+echo -e ' 10) Запуск сервиса smb' | tee -a /var/log/join-to-domain.log
 systemctl enable smb --now &>> /var/log/join-to-domain.log
 
 # Настройка /etc/security/pam_winbind.conf
@@ -1080,76 +1099,100 @@ fi
 #---------------------------End winbind----------------------------------------------#
 
 
+srv_dc="$kdc1"
 # ***** realm join in GUI *****
 if [[ -n "$v_pass_admin_gui" ]];
 then
-  echo -e ' 5) Ввод в домен (GUI)...' | tee -a /var/log/join-to-domain.log
+# Удаление DNS записи
+echo -e " ***Выполнение <samba-tool dns delete>***" &>> /var/log/join-to-domain.log	
+host_ip=$(nslookup `hostname -s` | awk '/^Address: / {print $2}')
+if [ -n "$host_ip" ]; then
+	dns=`nmcli dev show | awk '/DNS/{print $2}' | head -n1`
+	host=`hostname -s`
+	samba-tool dns delete $dns $v_domain $host A $host_ip -U $v_admin -d 2 <<< $v_pass_admin_gui &>> /var/log/join-to-domain.log
+fi
+
+  echo -e ' 4) Ввод в домен (GUI)...' | tee -a /var/log/join-to-domain.log
 (
-    join_count=1
-    realm join -vvv -U $v_admin $kdc1 --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin_gui &>> /var/log/join-to-domain.log
-    code_err=$?
-    while [ $code_err -ne 0 ]; do
-       join_count=$((join_count+1))
-       echo -e ' Ввод в домен. Попытка №'$join_count | tee -a /var/log/join-to-domain.log
-       realm join -vvv -U $v_admin $kdc1 --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin_gui &>> /var/log/join-to-domain.log
-       code_err=$?
-       if [ "$join_count" -gt 3 ]; then
-         touch /tmp/realm-join-error
-         break
-       fi
-     done
+	join_count=1
+	realm join -vvv -U "$v_admin" "$srv_dc" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin_gui &>> /var/log/join-to-domain.log
+	code_err=$?
+	while [ $code_err -ne 0 ]; do
+		join_count=$((join_count+1))
+		echo -e ' Ввод в домен. Попытка №'$join_count | tee -a /var/log/join-to-domain.log
+		realm join -vvv -U "$v_admin" "$srv_dc" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin_gui &>> /var/log/join-to-domain.log
+		code_err=$?
+		if [ $code_err -ne 0 ]; then
+			srv_dc="$v_domain"
+		fi
+		if [ "$join_count" -gt 3 ]; then
+			touch /tmp/realm-join-error
+			break
+		fi
+	done
 ) |
-zenity  --title="Ввод в домен!" \
-        --text="Выполняю ввод в домен..." \
-        --width=300 --height=140 --progress --pulsate --auto-close --auto-kill &> /dev/null
+zenity  --title="Ввод в домен!" --text="Выполняю ввод в домен..." --width=300 --height=140 --progress --pulsate --auto-close --auto-kill &> /dev/null
 fi
 
 # Если файл ошибки(realm join...) существует, то выводим ошибку и выходим из сценария.
 if [ -f "/tmp/realm-join-error" ]
 then
-    zenity --error \
-           --title="Ввод в домен" \
-           --text="Ошибка ввода в домен, см. /var/log/join-to-domain.log" \
-           --no-wrap &> /dev/null
-    rm -rf /tmp/realm-join-error
-    exit 1;
+	zenity --error --title="Ввод в домен" --text="Ошибка ввода в домен, см. /var/log/join-to-domain.log" --no-wrap &> /dev/null
+	rm -rf /tmp/realm-join-error
+	exit 1;
 fi
 
 # ***** realm join in console *****
 if [[ -z "$v_pass_admin_gui" ]]
 then
-  join_count=1
-  echo -e ' 5) Ввод в домен ... ' | tee -a /var/log/join-to-domain.log
-
-  if [[ ! -z "$v_ou" ]]; then
-     realm join -vvv -U "$v_admin" "$kdc1" "$v_ou_realm_join" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin &>> /var/log/join-to-domain.log
-  else  realm join -vvv -U "$v_admin" "$kdc1" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin &>> /var/log/join-to-domain.log
-  fi
-  code_err=$?
-  while [ $code_err -ne 0 ]; do
-    join_count=$((join_count+1))
-    echo -e ' Ввод в домен. Попытка №'$join_count | tee -a /var/log/join-to-domain.log
-    if [[ ! -z "$v_ou" ]]; then
-       realm join -vvv -U "$v_admin" "$kdc1" "$v_ou_realm_join" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin &>> /var/log/join-to-domain.log
-    else  realm join -vvv -U "$v_admin" "$kdc1" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin &>> /var/log/join-to-domain.log
-    fi
-    code_err=$?
-    if [ "$join_count" -gt 3 ]; then
-        echo -e ${RED}'    Ошибка ввода в домен, см. /var/log/join-to-domain.log'${NC}
-        echo -e '    Ошибка ввода в домен, см. /var/log/join-to-domain.log' &>> /var/log/join-to-domain.log
-        exit 1;
-    fi
-  done
+# Удаление DNS записи
+echo -e " ***Выполнение <samba-tool dns delete>***" &>> /var/log/join-to-domain.log	
+host_ip=$(nslookup `hostname -s` | awk '/^Address: / {print $2}')
+if [ -n "$host_ip" ]; then
+	dns=`nmcli dev show | awk '/DNS/{print $2}' | head -n1`
+	host=`hostname -s`
+	samba-tool dns delete $dns $v_domain $host A $host_ip -U $v_admin -d 2 <<< $v_pass_admin &>> /var/log/join-to-domain.log
 fi
 
+	join_count=1
+	echo -e ' 4) Ввод в домен ... ' | tee -a /var/log/join-to-domain.log
+	if [[ ! -z "$v_ou" ]]; then
+		realm join -vvv -U "$v_admin" "$srv_dc" "$v_ou_realm_join" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin &>> /var/log/join-to-domain.log
+	else  realm join -vvv -U "$v_admin" "$srv_dc" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin &>> /var/log/join-to-domain.log
+	fi
+	code_err=$?
+	while [ $code_err -ne 0 ]; do
+		join_count=$((join_count+1))
+		echo ' Ввод в домен. Попытка №'$join_count &>> /var/log/join-to-domain.log
+		if [[ ! -z "$v_ou" ]]; then
+			realm join -vvv -U "$v_admin" "$srv_dc" "$v_ou_realm_join" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin &>> /var/log/join-to-domain.log
+		else  realm join -vvv -U "$v_admin" "$srv_dc" --os-name="$os_name" --os-version="$os_version" <<< $v_pass_admin &>> /var/log/join-to-domain.log
+		fi
+		code_err=$?
+		if [ $code_err -ne 0 ]; then
+			srv_dc="$v_domain"
+		fi
+		if [ "$join_count" -gt 3 ]; then
+			echo -e ${RED}'    Ошибка ввода в домен, см. /var/log/join-to-domain.log'${NC}
+			echo -e '    Ошибка ввода в домен, см. /var/log/join-to-domain.log' &>> /var/log/join-to-domain.log
+			exit 1;
+		fi
+	done
+
+fi
+
+if [[ -n "$save_case" ]]; then
+	login_case="Preserving"
+elif [[ -n "$lower_case" ]]; then
+	login_case="False"
+elif [[ -z $save_case || -z $lower_case ]]; then
+	login_case="False"
+fi
 
 # Настройка sssd.conf
-echo -e ' 6) Настройка sssd' | tee -a /var/log/join-to-domain.log
+echo -e ' 5) Настройка sssd' | tee -a /var/log/join-to-domain.log
 cp /etc/sssd/sssd.conf /etc/sssd/sssd.conf.$v_date_time &>> /var/log/join-to-domain.log
-if [[ -n "$v_slc" ]]; then
-   ulc="False"
-   else ulc="Preserving"         
-fi
+
 echo -e '[sssd]
 domains = '$(domainname -d)'
 config_file_version = 2
@@ -1157,9 +1200,9 @@ services = nss, pam
 
 [domain/'$(domainname -d)']
 ad_domain = '$(domainname -d)'
-ad_server = '$kdc1'
+ad_server = '$kdc1''$kdc2'
 krb5_realm = '$v_BIG_DOMAIN'
-case_sensitive = '$ulc'
+case_sensitive = '$login_case'
 realmd_tags = manages-system joined-with-samba
 
 # Кэширование аутентификационных данных, необходимо при недоступности домена
@@ -1200,6 +1243,10 @@ dyndns_refresh_interval = 43200
 dyndns_update_ptr = true
 dyndns_ttl = 3600
 
+krb5_lifetime = 24h # Срок действия билета истекает каждые 24ч и его можно непрерывно продлевать в течение 7 дней
+krb5_renewable_lifetime = 7d # Самопродление тикета, значение определяет максимальное время жизни тикета
+krb5_renew_interval = 60s # Определяет интервал необходимость обновления билета. По истечении половины срока действия билета билет продлевается автоматически.
+
 [nss]
 # Сколько секунд nss_sss должен кэшировать перечисления (запросы информации обо всех пользователях) Default: 120
 #entry_cache_timeout = 15
@@ -1219,18 +1266,18 @@ fi
 
 if [[ -z "$v_pass_admin_gui" ]];
 then
-    authconfig --enablemkhomedir --enablesssdauth --updateall &>> /var/log/join-to-domain.log
+	authconfig --enablemkhomedir --enablesssdauth --updateall &>> /var/log/join-to-domain.log
 fi
 
 # Настройка limits
-echo -e ' 7) Настройка limits' | tee -a /var/log/join-to-domain.log
+echo -e ' 6) Настройка limits' | tee -a /var/log/join-to-domain.log
 cp /etc/security/limits.conf /etc/security/limits.conf.$v_date_time
 echo -e '*     -  nofile  16384
 root  -  nofile  16384' > /etc/security/limits.conf
 
 
 # samba config log
-echo -e ' 8) Настройка samba' | tee -a /var/log/join-to-domain.log
+echo -e ' 7) Настройка samba' | tee -a /var/log/join-to-domain.log
 
 # backup smb.conf
 cp /etc/samba/smb.conf /etc/samba/smb.conf.$v_date_time
@@ -1295,50 +1342,53 @@ echo -e '[global]
 # Настройка /etc/security/pam_winbind.conf
 settings_pam_winbind
 
-# net ads in GUI
+# net ads dns in GUI
 if [[ -n "$v_pass_admin_gui" ]];
 then
-echo -e ' 9) Ввод samba в домен (GUI)...' | tee -a /var/log/join-to-domain.log
+echo -e ' 8) Ввод samba в домен и регистрация DNS записи (GUI)...' | tee -a /var/log/join-to-domain.log
 (
-    net ads join -S "$kdc1" -U $v_admin%$v_pass_admin_gui -D $v_domain &>> /var/log/join-to-domain.log
-    if [ "$?" = 1 ]; then
-        touch /tmp/net-ads-join-error
-    fi
+	net ads join -S "$kdc1" -U $v_admin%$v_pass_admin_gui -D $v_domain -d 2 &>> /var/log/join-to-domain.log
+	if [ "$?" = 1 ]; then
+		touch /tmp/net-ads-join-error
+	fi
 sleep 2
 ) |
 zenity  --title="Ввод в домен!" \
-        --text="Выполняю команду net ads join..." \
+        --text="Ввод samba в домен и регистрация DNS записи" \
         --width=300 --height=140 --progress --pulsate --auto-close --auto-kill &> /dev/null
-fi
 
 if [ -f "/tmp/net-ads-join-error" ]
 then
     zenity --error \
            --title="Ввод в домен" \
-           --text="Ошибка ввода в домен, см. /var/log/join-to-domain.log" \
+           --text="Ошибка выполнения команды net ads join, см. /var/log/join-to-domain.log" \
            --no-wrap &> /dev/null
 rm -rf /tmp/net-ads-join-error
 exit 1;
 fi
 
-# net ads in console
+fi
+
+# net ads dns in console
 if [[ -z "$v_pass_admin_gui" ]]
 then
-	echo -e ' 9) Ввод samba в домен...' | tee -a /var/log/join-to-domain.log
-    net ads join -S "$kdc1" -U $v_admin%$v_pass_admin -D $v_domain &>> /var/log/join-to-domain.log
+	echo -e ' 8) Ввод samba в домен и регистрация DNS записи' | tee -a /var/log/join-to-domain.log
+	net ads join -S "$kdc1" -U $v_admin%$v_pass_admin -D $v_domain -d 2 &>> /var/log/join-to-domain.log
+	if [ "$?" = 1 ]; then
+		echo ' Ошибка выполнения команды net ads join, см. /var/log/join-to-domain.log' | tee -a /var/log/join-to-domain.log
+		exit 1;
+	fi
 fi
 
 echo '    Лог установки: /var/log/join-to-domain.log'
 echo
 echo '    Выполнено. Компьютер успешно введен в домен! Перезагрузите ПК.' | tee -a /var/log/join-to-domain.log
 if [ -n "$gui" ]
-  then
-    zenity --info \
-           --title="Ввод в домен" \
-           --text="Компьютер успешно введен в домен! Перезагрузите ПК." \
-           --no-wrap &> /dev/null
+	then
+	zenity --info \
+		--title="Ввод в домен" \
+		--text="Компьютер успешно введен в домен! Перезагрузите ПК." \
+		--no-wrap &> /dev/null
 fi
-systemctl disable systemd-timesyncd &> /dev/null
-systemctl stop systemd-timesyncd &> /dev/null
 
 exit;
